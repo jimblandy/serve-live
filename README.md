@@ -4,6 +4,34 @@ This is a web server that serves up a static directory, but also
 provides [server-sent events] when files in that directory changes,
 so that web pages can automatically refresh.
 
+The served address is hard-coded as `0.0.0.0:3000`. This should be
+visible both from `localhost` and from the network. The served
+directory defaults to the current directory, but you can pass the path
+as an argument on the command line.
+
+To hook up the automatic refresh, I put the following code in `auto-reload.js`:
+
+    var events = new EventSource("events");
+    events.addEventListener("files-changed", (event) => {
+        events.close();
+        location.reload()
+    })
+
+    events.onerror = (err) => {
+        console.error("server-sent event source 'event' failed: ", err);
+    };
+
+Then I load it as a module from my HTML file (say, `index.html`):
+
+      <script type="module" src="auto-reload.js"></script>
+
+When I visit `localhost:3000`, that serves me `index.html`, which
+loads the module, which subscribes to update events at
+`http://localhost:3000/events`, and arranges to reload the tab
+whenever I touch anything. Done!
+
+Type `serve-live --help` for more details.
+
 ## But `npm start` does this already.
 
 Indeed, and much more!
@@ -50,7 +78,7 @@ And that depth is profound indeed:
 
 When I work on implementing the web platform itself, I want to know
 exactly what's happening at the level of the content APIs the browser
-exposes.  I'm not trying to build anything useful, I'm trying to
+exposes.  I'm not trying to build anything useful in JS, I'm trying to
 understand an API's behavior. Every layer that introduces a difference
 between what I wrote and what happens in the browser is a distraction
 for me.
