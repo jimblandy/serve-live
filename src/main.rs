@@ -196,7 +196,7 @@ fn serve_events(dir: &Path) -> Result<warp::reply::Response> {
     .into_response())
 }
 
-fn serve_file(tail: warp::path::Tail, root: &Path) -> Result<Response<String>> {
+fn serve_file(tail: warp::path::Tail, root: &Path) -> Result<Response<Vec<u8>>> {
     let mut path = root.join(tail.as_str());
 
     if path.is_dir() {
@@ -207,6 +207,7 @@ fn serve_file(tail: warp::path::Tail, root: &Path) -> Result<Response<String>> {
         Some("css") => Some("text/css"),
         Some("html") => Some("text/html"),
         Some("js") => Some("application/javascript"),
+        Some("png") => Some("image/png"),
         _ => None,
     };
 
@@ -217,7 +218,7 @@ fn serve_file(tail: warp::path::Tail, root: &Path) -> Result<Response<String>> {
             if let Some(mime_type) = mime_type {
                 response = response.header("Content-Type", mime_type);
             }
-            Ok(response.body(String::from_utf8_lossy(&bytes).into_owned())?)
+            Ok(response.body(bytes)?)
         },
         Err(err) => {
             log::error!("serve_file:");
@@ -226,7 +227,7 @@ fn serve_file(tail: warp::path::Tail, root: &Path) -> Result<Response<String>> {
             log::error!("    error: {}", err);
             Ok(Response::builder()
                .status(StatusCode::BAD_REQUEST)
-               .body("request failed".to_string())?)
+               .body("request failed".to_string().into_bytes())?)
         },
     }
 }
