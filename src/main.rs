@@ -9,8 +9,9 @@ use warp::{Filter, Reply};
 use warp::http;
 
 use std::ffi::OsStr;
-use std::fs;
+use std::{fs, net};
 use std::path::{Path, PathBuf};
+use std::str::FromStr as _;
 
 mod stream_own;
 
@@ -30,12 +31,20 @@ mod stream_own;
 ///   assume that all files may have changed.
 struct ServeLive {
     #[argh(positional)]
-    /// directory to serve. Defaults to '.'
+    /// directory to serve. (Default: '.')
     path: Option<String>,
 
-    /// path for server-sent events reporting file changes ("events")
-    #[argh(option)]
-    event_path: Option<String>,
+    #[argh(option, default=r#"arg_address("0.0.0.0:3000")"#)]
+    /// address to listen for HTTP requests on. (Default: 0.0.0.0:3000)
+    address: net::SocketAddr,
+
+    /// path for server-sent events reporting file changes. (Default: 'events')
+    #[argh(option, default=r#"String::from("events")"#)]
+    event_path: String,
+}
+
+fn arg_address(arg: &str) -> net::SocketAddr {
+    net::SocketAddr::from_str(arg).unwrap()
 }
 
 #[tokio::main]
@@ -55,7 +64,7 @@ async fn main() -> Result<()> {
     eprintln!("Serving files from {}", root.display());
 
     // Create a filter for server-sent events.
-    let events_path = args.event_path.unwrap_or_else(|| "events".to_string());
+    let events_path = args.event_path;
     let root_clone = root.clone();
     let events = warp::path(events_path)
         .and(warp::get())
@@ -67,7 +76,7 @@ async fn main() -> Result<()> {
     });
 
     warp::serve(events.or(files))
-        .run(([0, 0, 0, 0], 3000))
+        .run(args.address)
         .await;
 
     Ok(())
