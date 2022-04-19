@@ -1,45 +1,35 @@
 use anyhow::{bail, Result};
 use argh::FromArgs;
 use futures_util::StreamExt;
-use http::response::Response;
-use http::status::StatusCode;
 use notify::Watcher;
 use warp::{Filter, Reply};
 // Use warp's re-export of http crate, to be sure we get the right version.
+use http::response::Response;
+use http::status::StatusCode;
 use warp::http;
+use warp::http::Uri;
+use warp::hyper::Body;
 
 use std::ffi::OsStr;
-use std::{fs, net};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::str::FromStr as _;
+use std::{fs, net};
 
 mod stream_own;
 
 #[derive(FromArgs)]
 /// Serve a directory's contents, providing server-sent events when files are changed.
-///
-/// By default, the path `/changes` is a source of server-sent events.
-///
-/// There is only one kind of server-sent event: `files-changed`. These have a
-/// `data` property which holds a JSON-encoded object with the following properties:
-///
-/// - `paths`: an array of strings, representing the relative paths of the files
-///   that have changed.
-///
-/// - `dropped`: a boolean value, true if file change events have been dropped
-///   due to backpressure since the last event. If this is `true`, the client should
-///   assume that all files may have changed.
 struct ServeLive {
     #[argh(positional)]
     /// directory to serve. (Default: '.')
     path: Option<String>,
 
-    #[argh(option, default=r#"arg_address("0.0.0.0:3000")"#)]
+    #[argh(option, default = r#"arg_address("0.0.0.0:3000")"#)]
     /// address to listen for HTTP requests on. (Default: 0.0.0.0:3000)
     address: net::SocketAddr,
 
     /// path for server-sent events reporting file changes. (Default: 'events')
-    #[argh(option, default=r#"String::from("events")"#)]
+    #[argh(option, default = r#"String::from("events")"#)]
     event_path: String,
 }
 
@@ -70,14 +60,16 @@ async fn main() -> Result<()> {
         .and(warp::get())
         .map(move || result_to_response("server-sent event source", serve_events(&root_clone)));
 
-    // Create a filter for actual files.
+    // Create a filter for serving actual files.
+    //
+    // Not using warp::fs::dir because of
+    // https://github.com/seanmonstar/warp/issues/953
+    let base_uri = Uri::from_static("/");
     let files = warp::path::tail().map(move |tail: warp::filters::path::Tail| {
-        result_to_response("file server", serve_file(tail, &root))
+        result_to_response("file server", serve_file(tail, &base_uri, &root))
     });
 
-    warp::serve(events.or(files))
-        .run(args.address)
-        .await;
+    warp::serve(events.or(files)).run(args.address).await;
 
     Ok(())
 }
@@ -115,13 +107,20 @@ fn serve_events(dir: &Path) -> Result<warp::reply::Response> {
     fn is_auto_save(path: &Path) -> bool {
         // There's no better way to do this at the moment.
         // https://github.com/rust-lang/rust/issues/49802
-        path.file_name().and_then(OsStr::to_str).map_or(false, |s| s.starts_with(".#")) 
+        path.file_name()
+            .and_then(OsStr::to_str)
+            .map_or(false, |s| s.starts_with(".#"))
     }
 
     /// Return true if `path` is the name of an Emacs
     /// backup file.
     fn is_backup(path: &Path) -> bool {
         path.to_str().map_or(false, |s| s.ends_with('~'))
+    }
+
+    fn is_git_metadata(path: &Path) -> bool {
+        path.components()
+            .any(|c| matches!(c, Component::Normal(s) if s == ".git"))
     }
 
     // Create an asynchronous channel for the `notify` watcher to send events
@@ -143,29 +142,35 @@ fn serve_events(dir: &Path) -> Result<warp::reply::Response> {
                     dropped,
                 };
 
-                // Ignore changes to some files. Ideally we could use
-                // the `gitignore` crate for this.
+                // Ignore changes to some files.
+                //
+                // Ideally this would be more configurable.
+                //
+                // I had an impulse that we should .gitignore files, but then I
+                // realized that's not the right set of files: many files that
+                // you would want listed in .gitignore are computation products
+                // that you do want to serve to the browser.
                 event.paths.retain(|path| {
-                    !is_auto_save(path) && !is_backup(path)
+                    !is_auto_save(path) && !is_backup(path) && !is_git_metadata(path)
                 });
                 if event.paths.is_empty() {
                     log::trace!("    all changed filenames filtered out, event dropped");
                     return;
                 }
-                
+
                 match serde_json::to_string(&event) {
-                    Ok(json) => {
-                        match tx.try_send(json) {
-                            Ok(()) => { dropped = false; }
-                            Err(error) => {
-                                if error.is_full() {
-                                    dropped = true;
-                                } else if !error.is_disconnected() {
-                                    log::error!("error sending on channel: {}", error);
-                                }
+                    Ok(json) => match tx.try_send(json) {
+                        Ok(()) => {
+                            dropped = false;
+                        }
+                        Err(error) => {
+                            if error.is_full() {
+                                dropped = true;
+                            } else if !error.is_disconnected() {
+                                log::error!("error sending on channel: {}", error);
                             }
                         }
-                    }
+                    },
                     Err(error) => {
                         log::error!("error serializing event: {}", error);
                     }
@@ -196,6 +201,7 @@ fn serve_events(dir: &Path) -> Result<warp::reply::Response> {
     // Let this stream take ownership of `watcher`, so that if the
     // server-sent event stream ends or gets dropped, the notify
     // descriptor will get freed promptly.
+    log::trace!("serving modification events for {:?}", dir);
     let event_stream = stream_own::own(event_stream, watcher);
     Ok(sse::reply(
         sse::keep_alive()
@@ -205,11 +211,23 @@ fn serve_events(dir: &Path) -> Result<warp::reply::Response> {
     .into_response())
 }
 
-fn serve_file(tail: warp::path::Tail, root: &Path) -> Result<Response<Vec<u8>>> {
+fn serve_file(tail: warp::path::Tail, base_uri: &Uri, root: &Path) -> Result<Response<Body>> {
+    let query = String::new();
     let mut path = root.join(tail.as_str());
 
     if path.is_dir() {
-        path.push("index.html");
+        let tail = tail.as_str();
+        if tail.is_empty() || tail.ends_with('/') {
+            path.push("index.html");
+        } else {
+            // Produce a redirect to the path that does end with a slash.
+            let path = format!("{}/{}", tail, query);
+            let mut parts = base_uri.clone().into_parts();
+            parts.path_and_query = Some(http::uri::PathAndQuery::from_maybe_shared(path)?);
+            let uri = Uri::from_parts(parts)?;
+            log::trace!("redirecting to URI: {:?}", uri);
+            return Ok(warp::redirect(uri).into_response());
+        }
     }
 
     let mime_type = match path.extension().and_then(std::ffi::OsStr::to_str) {
@@ -222,21 +240,21 @@ fn serve_file(tail: warp::path::Tail, root: &Path) -> Result<Response<Vec<u8>>> 
 
     match fs::read(&path) {
         Ok(bytes) => {
-            let mut response = Response::builder()
-                .status(StatusCode::OK);
+            let mut response = Response::builder().status(StatusCode::OK);
             if let Some(mime_type) = mime_type {
                 response = response.header("Content-Type", mime_type);
             }
-            Ok(response.body(bytes)?)
-        },
+            log::trace!("serving contents of {:?}", path);
+            Ok(response.body(bytes.into())?)
+        }
         Err(err) => {
             log::error!("serve_file:");
             log::error!("    tail: {:?}", tail);
             log::error!("    path: {}", path.display());
             log::error!("    error: {}", err);
             Ok(Response::builder()
-               .status(StatusCode::BAD_REQUEST)
-               .body("request failed".to_string().into_bytes())?)
-        },
+                .status(StatusCode::BAD_REQUEST)
+                .body("request failed".into())?)
+        }
     }
 }

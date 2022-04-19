@@ -32,6 +32,20 @@ whenever I touch anything. Done!
 
 Type `serve-live --help` for more details.
 
+## File changes event stream
+
+By default, the path `/changes` is a source of server-sent events. 
+
+There is only one kind of server-sent event: `files-changed`. These have a 
+`data` property which holds a JSON-encoded object with the following properties: 
+
+- `paths`: an array of strings, representing the relative paths of the files 
+  that have changed. 
+
+- `dropped`: a boolean value, true if file change events have been dropped 
+  due to backpressure since the last event. If this is `true`, the client should 
+  assume that all files may have changed. 
+
 ## But `npm start` does this already.
 
 Indeed, and much more!

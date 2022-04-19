@@ -4,22 +4,26 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 
 /// A wrapper for a stream that drops some data when the stream ends or is dropped.
-pub struct StreamOwns<S, T>
-{
+pub struct StreamOwns<S, T> {
     stream: S,
-    owned: Option<T>
+    owned: Option<T>,
 }
 
 pub fn own<S, T>(stream: S, owned: T) -> StreamOwns<S, T>
-where S: Stream + Unpin
+where
+    S: Stream + Unpin,
 {
-    StreamOwns { stream, owned: Some(owned) }
+    StreamOwns {
+        stream,
+        owned: Some(owned),
+    }
 }
 
 impl<S, T> Unpin for StreamOwns<S, T> {}
 
 impl<S, T> Stream for StreamOwns<S, T>
-where S: Stream + Unpin
+where
+    S: Stream + Unpin,
 {
     type Item = S::Item;
 
@@ -29,7 +33,7 @@ where S: Stream + Unpin
                 self.owned = None;
                 Poll::Ready(None)
             }
-            other => other
+            other => other,
         }
     }
 }
