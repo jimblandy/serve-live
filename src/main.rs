@@ -51,7 +51,9 @@ async fn main() -> Result<()> {
         bail!("Not a directory: {}", root.display());
     }
     let root = fs::canonicalize(&root)?;
-    eprintln!("Serving files from {}", root.display());
+
+    println!("Serving HTTP at {:?}", args.address);
+    println!("    Serving files from {}", root.display());
 
     // Create a filter for server-sent events.
     let events_path = args.event_path;
