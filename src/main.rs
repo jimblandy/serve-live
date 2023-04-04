@@ -236,6 +236,7 @@ fn serve_file(tail: warp::path::Tail, base_uri: &Uri, root: &Path) -> Result<Res
         Some("html") => Some("text/html"),
         Some("js") => Some("application/javascript"),
         Some("png") => Some("image/png"),
+        Some("wasm") => Some("application/wasm"),
         _ => None,
     };
 
